@@ -5,6 +5,7 @@ import ShortCard from './components/ShortCard'
 import ErrorBanner from './components/ErrorBanner'
 import ManualLlmPanel from './components/ManualLlmPanel'
 import useJobPoller from './hooks/useJobPoller'
+import useClientVideoRender from './hooks/useClientVideoRender'
 
 export default function App() {
   const [jobId, setJobId] = useState(null)
@@ -18,19 +19,63 @@ export default function App() {
     transcript,
     clipStart,
     clipEnd,
+    renderMode,
+    resumePolling,
   } = useJobPoller(jobId)
 
+  const useBrowserRender = renderMode === 'browser'
+
+  const {
+    renderedShorts,
+    renderProgress,
+    renderMessage,
+    renderError,
+    renderDone,
+    isRendering,
+  } = useClientVideoRender(
+    jobId,
+    status,
+    shorts,
+    renderMode,
+  )
+
+  const renderedById = Object.fromEntries(
+    renderedShorts.map((s) => [s.id, s]),
+  )
+  const displayShorts = shorts.map(
+    (short) => renderedById[short.id] || short,
+  )
+
+  const displayStatus = useBrowserRender
+    ? renderDone
+      ? 'done'
+      : isRendering
+        ? 'ready_to_render'
+        : status
+    : status
+
+  const displayProgress =
+    useBrowserRender && (isRendering || renderDone) ? renderProgress : progress
+  const displayMessage =
+    renderError ||
+    (useBrowserRender && (isRendering || renderDone) ? renderMessage : message) ||
+    message
+
   const isActive =
-    jobId &&
-    status &&
-    !['done', 'error'].includes(status)
+    jobId && displayStatus && !['done', 'error'].includes(displayStatus)
 
   const handleJobStart = (id) => {
     setJobId(id)
   }
 
   const handleNewJob = () => {
-    if (jobId && (status === 'done' || status === 'error' || status === 'awaiting_llm')) {
+    if (
+      jobId &&
+      (status === 'done' ||
+        status === 'error' ||
+        status === 'awaiting_llm' ||
+        renderDone)
+    ) {
       fetch(`/api/cleanup/${jobId}/`, { method: 'DELETE' }).catch(() => {})
     }
     setJobId(null)
@@ -54,12 +99,12 @@ export default function App() {
 
         {jobId && (
           <>
-            <ErrorBanner error={status === 'error' ? error : null} />
+            <ErrorBanner error={status === 'error' ? error : renderError} />
 
             <ProgressTracker
-              status={status}
-              progress={progress}
-              message={message}
+              status={displayStatus}
+              progress={displayProgress}
+              message={displayMessage}
             />
 
             {status === 'awaiting_llm' && llmPrompt && (
@@ -69,21 +114,27 @@ export default function App() {
                 transcript={transcript}
                 clipStart={clipStart}
                 clipEnd={clipEnd}
+                onContinue={resumePolling}
               />
             )}
 
-            {shorts.length > 0 && (
+            {displayShorts.length > 0 && (
               <section className="space-y-6">
                 <h2 className="font-display text-2xl tracking-widest text-white">
                   YOUR SHORTS
                 </h2>
-                {shorts.map((short) => (
-                  <ShortCard key={short.id} jobId={jobId} short={short} />
+                {displayShorts.map((short) => (
+                  <ShortCard
+                    key={short.id}
+                    jobId={jobId}
+                    short={short}
+                    ready={!useBrowserRender || Boolean(short.videoUrl)}
+                  />
                 ))}
               </section>
             )}
 
-            {(status === 'done' || status === 'awaiting_llm') && (
+            {(displayStatus === 'done' || status === 'awaiting_llm') && (
               <div className="text-center">
                 <button
                   type="button"

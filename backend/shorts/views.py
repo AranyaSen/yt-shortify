@@ -49,6 +49,20 @@ def _parse_time_value(value):
     return None
 
 
+def _parse_render_mode(value) -> str:
+    if isinstance(value, str):
+        v = value.strip().lower()
+        if v in ('browser', 'wasm', 'client'):
+            return 'browser'
+        if v in ('native', 'server', 'ffmpeg'):
+            return 'native'
+    if value is False:
+        return 'browser'
+    if value is True:
+        return 'native'
+    return 'native'
+
+
 class GenerateView(APIView):
     def post(self, request):
         url = (request.data.get('url') or '').strip()
@@ -79,11 +93,14 @@ class GenerateView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        render_mode = _parse_render_mode(request.data.get('render_mode', 'native'))
+
         job_id = job_store.create_job(
             clip_start=clip_start,
             clip_end=clip_end,
             num_shorts=num_shorts,
             use_local_llm=use_local_llm,
+            render_mode=render_mode,
         )
 
         thread = threading.Thread(
@@ -127,6 +144,14 @@ class ContinueView(APIView):
                 status=status.HTTP_400_BAD_REQUEST,
             )
 
+        job_store.update_job(
+            job_id,
+            status='analyzing',
+            progress=0.55,
+            message='Parsing your LLM response…',
+            error=None,
+        )
+
         thread = threading.Thread(
             target=run_continue,
             args=(job_id, llm_response),
@@ -147,6 +172,85 @@ class StatusView(APIView):
                 status=status.HTTP_404_NOT_FOUND,
             )
         return Response(job)
+
+
+class SegmentView(APIView):
+    def get(self, request, job_id, short_id):
+        if not re.match(r'^short_\d+$', short_id):
+            raise Http404('Invalid short id')
+
+        if not job_store.job_exists(job_id):
+            raise Http404('Job not found')
+
+        path = settings.TEMP_DIR / job_id / 'segments' / f'{short_id}.mp4'
+        if not path.exists():
+            raise Http404('Segment not found')
+
+        return FileResponse(
+            open(path, 'rb'),
+            content_type='video/mp4',
+            as_attachment=False,
+        )
+
+
+class SourceView(APIView):
+    def get(self, request, job_id):
+        if not job_store.job_exists(job_id):
+            raise Http404('Job not found')
+
+        job_dir = settings.TEMP_DIR / job_id
+        if not job_dir.exists():
+            raise Http404('Source video not found')
+
+        for name in ('source.mp4', 'source.mkv', 'source.webm'):
+            path = job_dir / name
+            if path.exists():
+                return FileResponse(
+                    open(path, 'rb'),
+                    content_type='video/mp4',
+                    as_attachment=False,
+                )
+
+        for f in job_dir.iterdir():
+            if f.suffix.lower() in ('.mp4', '.mkv', '.webm', '.mov'):
+                return FileResponse(
+                    open(f, 'rb'),
+                    content_type='video/mp4',
+                    as_attachment=False,
+                )
+
+        raise Http404('Source video not found')
+
+
+class RenderCompleteView(APIView):
+    def post(self, request, job_id):
+        if not job_store.job_exists(job_id):
+            return Response(
+                {'error': 'Job not found'},
+                status=status.HTTP_404_NOT_FOUND,
+            )
+
+        current = job_store.get_job_status(job_id)
+        job = job_store.get_job(job_id)
+        if job and job.get('render_mode') != 'browser':
+            return Response(
+                {'error': 'Render complete is only for browser rendering mode'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        if current not in ('ready_to_render', 'rendering', 'extracting_segments'):
+            return Response(
+                {'error': f'Job is not ready to finalize (status: {current})'},
+                status=status.HTTP_400_BAD_REQUEST,
+            )
+
+        job_store.update_job(
+            job_id,
+            status='done',
+            progress=1.0,
+            message='All shorts ready!',
+        )
+        return Response({'ok': True})
 
 
 class DownloadView(APIView):

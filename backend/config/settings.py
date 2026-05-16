@@ -79,8 +79,6 @@ LMSTUDIO_URL = 'http://127.0.0.1:1234'
 DEFAULT_MODEL = 'qwen3-8b'
 WHISPER_MODEL_SIZE = 'base'
 JOB_CLEANUP_SECONDS = 3600
-# Optional: path to ffmpeg.exe or its bin folder (auto-detected on Windows if unset)
-FFMPEG_PATH = None
 
 REST_FRAMEWORK = {
     'DEFAULT_RENDERER_CLASSES': [

@@ -1,4 +1,9 @@
-import { useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+
+const pollInterval = (status) => {
+  if (status === 'analyzing' || status === 'ready_to_render') return 10000
+  return 5000
+}
 
 export default function useJobPoller(jobId) {
   const [status, setStatus] = useState(null)
@@ -10,10 +15,14 @@ export default function useJobPoller(jobId) {
   const [transcript, setTranscript] = useState(null)
   const [clipStart, setClipStart] = useState(null)
   const [clipEnd, setClipEnd] = useState(null)
+  const [renderMode, setRenderMode] = useState('native')
   const timeoutRef = useRef(null)
   const statusRef = useRef(null)
+  const pollRef = useRef(null)
 
-  const pollInterval = (status) => (status === 'cutting' ? 10000 : 5000)
+  const resumePolling = useCallback(() => {
+    pollRef.current?.()
+  }, [])
 
   useEffect(() => {
     if (!jobId) return
@@ -31,7 +40,7 @@ export default function useJobPoller(jobId) {
       stop()
       if (!active) return
       const status = statusRef.current
-      if (status === 'done' || status === 'error') return
+      if (status === 'done' || status === 'error' || status === 'awaiting_llm') return
       timeoutRef.current = setTimeout(poll, pollInterval(status))
     }
 
@@ -55,8 +64,17 @@ export default function useJobPoller(jobId) {
         setTranscript(data.transcript ?? null)
         setClipStart(data.clip_start ?? null)
         setClipEnd(data.clip_end ?? null)
+        setRenderMode(data.render_mode ?? 'native')
 
-        if (data.status === 'done' || data.status === 'error') {
+        const stopForBrowserRender =
+          data.render_mode === 'browser' && data.status === 'ready_to_render'
+
+        if (
+          data.status === 'done' ||
+          data.status === 'error' ||
+          data.status === 'awaiting_llm' ||
+          stopForBrowserRender
+        ) {
           stop()
           return
         }
@@ -66,10 +84,12 @@ export default function useJobPoller(jobId) {
       }
     }
 
+    pollRef.current = poll
     poll()
 
     return () => {
       active = false
+      pollRef.current = null
       stop()
     }
   }, [jobId])
@@ -84,5 +104,7 @@ export default function useJobPoller(jobId) {
     transcript,
     clipStart,
     clipEnd,
+    renderMode,
+    resumePolling,
   }
 }

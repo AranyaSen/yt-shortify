@@ -1,6 +1,5 @@
 import json
 import re
-import subprocess
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -10,7 +9,7 @@ from django.conf import settings
 from faster_whisper import WhisperModel
 
 from shorts import job_store
-from shorts.ffmpeg_util import ffmpeg_bin_dir, resolve_ffmpeg
+from shorts.segment_util import extract_segment, render_vertical_short
 
 
 def update_job(job_id: str, **kwargs):
@@ -23,14 +22,8 @@ def _job_dir(job_id: str) -> Path:
     return d
 
 
-def _output_dir(job_id: str) -> Path:
-    d = settings.OUTPUT_DIR / job_id
-    d.mkdir(parents=True, exist_ok=True)
-    return d
-
-
 def _find_source_video(job_dir: Path) -> Path:
-    for name in ('trimmed.mp4', 'source.mp4', 'source.mkv', 'source.webm'):
+    for name in ('source.mp4', 'source.mkv', 'source.webm'):
         p = job_dir / name
         if p.exists():
             return p
@@ -68,13 +61,12 @@ def _download_video(job_id: str, url: str) -> Path:
     job_dir = _job_dir(job_id)
     out_template = str(job_dir / 'source.%(ext)s')
 
-    resolve_ffmpeg()
-
     ydl_opts = {
-        'format': 'best[ext=mp4]/bestvideo[ext=mp4]+bestaudio[ext=m4a]/best',
+        'format': (
+            'best[ext=mp4][vcodec^=avc1]/best[ext=mp4]/'
+            'best[height<=1080][ext=mp4]/best'
+        ),
         'outtmpl': out_template,
-        'merge_output_format': 'mp4',
-        'ffmpeg_location': str(ffmpeg_bin_dir()),
         'noplaylist': True,
         'quiet': True,
         'no_warnings': True,
@@ -84,81 +76,40 @@ def _download_video(job_id: str, url: str) -> Path:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             ydl.download([url])
     except Exception as e:
-        err = str(e)
-        if 'ffmpeg is not installed' in err.lower() or 'ffmpeg' in err.lower():
-            raise RuntimeError(
-                'FFmpeg not found. Install: winget install Gyan.FFmpeg '
-                '(then restart Django), or set FFMPEG_PATH in settings.py'
-            ) from e
-        raise RuntimeError(err) from e
+        raise RuntimeError(str(e)) from e
 
     return _find_source_video(job_dir)
 
 
-def _trim_source(
-    source: Path,
-    job_dir: Path,
+def _clip_timestamps_arg(
     clip_start: float | None,
     clip_end: float | None,
-) -> Path:
+) -> str | None:
     if clip_start is None and clip_end is None:
-        return source
-
+        return None
     start = float(clip_start or 0)
-    out = job_dir / 'trimmed.mp4'
-    ffmpeg = str(resolve_ffmpeg())
-    cmd = [ffmpeg, '-y', '-i', str(source), '-ss', str(start)]
     if clip_end is not None:
-        cmd.extend(['-to', str(float(clip_end))])
-    cmd.extend([
-        '-c:v', 'libx264', '-preset', 'fast', '-crf', '23',
-        '-c:a', 'aac', '-b:a', '128k',
-        str(out),
-    ])
-    try:
-        subprocess.run(cmd, check=True, capture_output=True, text=True)
-    except FileNotFoundError as e:
-        raise RuntimeError(
-            'FFmpeg not found. Install: winget install Gyan.FFmpeg '
-            '(then restart Django), or set FFMPEG_PATH in settings.py'
-        ) from e
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(e.stderr or 'FFmpeg video trim failed') from e
-    return out
+        return f'{start},{float(clip_end)}'
+    return f'{start},'
 
 
-def _extract_audio(source: Path, job_dir: Path) -> Path:
-    audio_path = job_dir / 'audio.wav'
-    ffmpeg = str(resolve_ffmpeg())
-    cmd = [
-        ffmpeg, '-y', '-i', str(source),
-        '-vn', '-acodec', 'pcm_s16le',
-        '-ar', '16000', '-ac', '1',
-        str(audio_path),
-    ]
-    try:
-        subprocess.run(cmd, check=True, capture_output=True, text=True)
-    except FileNotFoundError as e:
-        raise RuntimeError(
-            'FFmpeg not found. Install: winget install Gyan.FFmpeg '
-            '(then restart Django), or set FFMPEG_PATH in settings.py'
-        ) from e
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(e.stderr or 'FFmpeg audio extraction failed') from e
-    return audio_path
-
-
-def _transcribe(audio_path: Path) -> str:
+def _transcribe(
+    source: Path,
+    clip_start: float | None = None,
+    clip_end: float | None = None,
+) -> str:
     try:
         model = WhisperModel(
             settings.WHISPER_MODEL_SIZE,
             device='cpu',
             compute_type='int8',
         )
-        segments, _ = model.transcribe(
-            str(audio_path),
-            word_timestamps=True,
-        )
+        kwargs = {}
+        clip_ts = _clip_timestamps_arg(clip_start, clip_end)
+        if clip_ts:
+            kwargs['clip_timestamps'] = clip_ts
+
+        segments, _ = model.transcribe(str(source), **kwargs)
     except MemoryError:
         raise RuntimeError(
             'Transcription failed — try a shorter video'
@@ -235,56 +186,35 @@ def _call_lm_studio(prompt: str, model: str) -> list:
     return parse_llm_clips(content)
 
 
-def _cut_vertical(source: Path, output: Path, start: float, end: float):
-    vf = (
-        '[0:v]scale=1080:1920:force_original_aspect_ratio=decrease,'
-        'pad=1080:1920:(ow-iw)/2:(oh-ih)/2,setsar=1,boxblur=20:20[bg];'
-        '[0:v]scale=1080:1920:force_original_aspect_ratio=decrease[fg];'
-        '[bg][fg]overlay=(W-w)/2:(H-h)/2'
-    )
-    ffmpeg = str(resolve_ffmpeg())
-    cmd = [
-        ffmpeg, '-y',
-        '-i', str(source),
-        '-ss', str(start),
-        '-to', str(end),
-        '-filter_complex', vf,
-        '-c:v', 'libx264', '-crf', '23', '-preset', 'fast',
-        '-c:a', 'aac', '-b:a', '128k',
-        str(output),
-    ]
-    try:
-        subprocess.run(cmd, check=True, capture_output=True, text=True)
-    except FileNotFoundError as e:
-        raise RuntimeError(
-            'FFmpeg not found. Install: winget install Gyan.FFmpeg '
-            '(then restart Django), or set FFMPEG_PATH in settings.py'
-        ) from e
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(e.stderr or 'FFmpeg clip cutting failed') from e
+def _output_dir(job_id: str) -> Path:
+    d = settings.OUTPUT_DIR / job_id
+    d.mkdir(parents=True, exist_ok=True)
+    return d
 
 
-def _render_clips(job_id: str, source: Path, clips: list):
-    update_job(
-        job_id,
-        status='cutting',
-        progress=0.65,
-        message='Cutting and formatting vertical shorts…',
-    )
+def _segments_dir(job_id: str) -> Path:
+    d = _job_dir(job_id) / 'segments'
+    d.mkdir(parents=True, exist_ok=True)
+    return d
 
-    out_dir = _output_dir(job_id)
-    n = max(len(clips), 1)
 
+def _time_offset(job_id: str) -> float:
+    job = job_store.get_job(job_id)
+    if job and job.get('clip_start') is not None:
+        return float(job['clip_start'])
+    return 0.0
+
+
+def _build_shorts_meta(clips: list, time_offset: float) -> list:
+    shorts_meta = []
     for i, clip in enumerate(clips):
         short_id = f'short_{i + 1}'
-        start = float(clip.get('start_time', 0))
-        end = float(clip.get('end_time', start + 45))
+        rel_start = float(clip.get('start_time', 0))
+        rel_end = float(clip.get('end_time', rel_start + 45))
+        start = rel_start + time_offset
+        end = rel_end + time_offset
         duration = round(end - start, 1)
-
-        output_path = out_dir / f'{short_id}.mp4'
-        _cut_vertical(source, output_path, start, end)
-
-        short_meta = {
+        shorts_meta.append({
             'id': short_id,
             'title': clip.get('title', f'Short {i + 1}'),
             'hook': clip.get('hook', ''),
@@ -292,14 +222,50 @@ def _render_clips(job_id: str, source: Path, clips: list):
             'start_time': start,
             'end_time': end,
             'duration': duration,
-        }
-        update_job(job_id, shorts=short_meta)
+        })
+    return shorts_meta
 
-        progress = 0.65 + (0.35 * (i + 1) / n)
+
+def _render_mode(job_id: str) -> str:
+    job = job_store.get_job(job_id)
+    return (job or {}).get('render_mode', 'native')
+
+
+def finish_rendering(job_id: str, clips: list):
+    if _render_mode(job_id) == 'browser':
+        _prepare_client_render(job_id, clips)
+    else:
+        _render_native(job_id, clips)
+
+
+def _render_native(job_id: str, clips: list):
+    time_offset = _time_offset(job_id)
+    shorts_meta = _build_shorts_meta(clips, time_offset)
+    source = _find_source_video(_job_dir(job_id))
+    out_dir = _output_dir(job_id)
+    n = max(len(shorts_meta), 1)
+
+    update_job(
+        job_id,
+        status='cutting',
+        progress=0.65,
+        message='Rendering vertical shorts with native FFmpeg…',
+        shorts=[],
+    )
+
+    for i, meta in enumerate(shorts_meta):
+        output_path = out_dir / f'{meta["id"]}.mp4'
+        render_vertical_short(
+            source,
+            output_path,
+            meta['start_time'],
+            meta['end_time'],
+        )
+        update_job(job_id, shorts=meta)
         update_job(
             job_id,
-            progress=progress,
-            message=f'Rendered short {i + 1} of {len(clips)}…',
+            progress=0.65 + (0.35 * (i + 1) / n),
+            message=f'Rendered short {i + 1} of {len(shorts_meta)}…',
         )
 
     update_job(
@@ -307,6 +273,39 @@ def _render_clips(job_id: str, source: Path, clips: list):
         status='done',
         progress=1.0,
         message='All shorts ready!',
+    )
+
+
+def _prepare_client_render(job_id: str, clips: list):
+    time_offset = _time_offset(job_id)
+    shorts_meta = _build_shorts_meta(clips, time_offset)
+    source = _find_source_video(_job_dir(job_id))
+    seg_dir = _segments_dir(job_id)
+    n = max(len(shorts_meta), 1)
+
+    update_job(
+        job_id,
+        status='extracting_segments',
+        progress=0.60,
+        message='Cutting short segments from source video…',
+    )
+
+    for i, meta in enumerate(shorts_meta):
+        seg_path = seg_dir / f'{meta["id"]}.mp4'
+        extract_segment(source, seg_path, meta['start_time'], meta['end_time'])
+        update_job(
+            job_id,
+            progress=0.60 + (0.05 * (i + 1) / n),
+            message=f'Prepared segment {i + 1} of {len(shorts_meta)}…',
+        )
+
+    update_job(
+        job_id,
+        status='ready_to_render',
+        progress=0.65,
+        message='Formatting vertical shorts in your browser…',
+        shorts=shorts_meta,
+        time_offset=time_offset,
     )
 
 
@@ -327,23 +326,14 @@ def run_pipeline(
             message='Downloading video from YouTube…',
         )
         source = _download_video(job_id, url)
-        job_dir = source.parent
-
-        if clip_start is not None or clip_end is not None:
-            update_job(
-                job_id,
-                message='Trimming video to selected time range…',
-            )
-            source = _trim_source(source, job_dir, clip_start, clip_end)
 
         update_job(
             job_id,
             status='transcribing',
             progress=0.25,
-            message='Extracting audio and transcribing with Whisper…',
+            message='Transcribing audio with Whisper…',
         )
-        audio = _extract_audio(source, job_dir)
-        transcript = _transcribe(audio)
+        transcript = _transcribe(source, clip_start, clip_end)
         prompt = build_llm_prompt(transcript, num_shorts)
 
         if not use_local_llm:
@@ -364,7 +354,7 @@ def run_pipeline(
             message='Analyzing transcript with LM Studio…',
         )
         clips = _call_lm_studio(prompt, model)
-        _render_clips(job_id, source, clips)
+        finish_rendering(job_id, clips)
 
     except Exception as e:
         update_job(
@@ -377,9 +367,6 @@ def run_pipeline(
 
 def run_continue(job_id: str, llm_response: str):
     try:
-        job_dir = _job_dir(job_id)
-        source = _find_source_video(job_dir)
-
         update_job(
             job_id,
             status='analyzing',
@@ -388,7 +375,7 @@ def run_continue(job_id: str, llm_response: str):
             error=None,
         )
         clips = parse_llm_clips(llm_response)
-        _render_clips(job_id, source, clips)
+        finish_rendering(job_id, clips)
 
     except Exception as e:
         update_job(

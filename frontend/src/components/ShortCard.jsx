@@ -5,20 +5,30 @@ function formatTime(seconds) {
   return `${m}:${String(rem).padStart(2, '0')}`
 }
 
-export default function ShortCard({ jobId, short }) {
-  const videoSrc = `/api/download/${jobId}/${short.id}/`
+export default function ShortCard({ jobId, short, ready = true }) {
+  const videoSrc =
+    short.videoUrl || `/api/download/${jobId}/${short.id}/`
   const downloadHref = videoSrc
 
   return (
     <article className="overflow-hidden rounded-xl border border-cinema-border bg-cinema-surface">
       <div className="flex flex-col gap-4 p-5 lg:flex-row">
         <div className="mx-auto w-full max-w-[280px] shrink-0">
-          <video
-            src={videoSrc}
-            controls
-            preload="metadata"
-            className="aspect-[9/16] w-full rounded-lg bg-black object-cover"
-          />
+          {ready ? (
+            <video
+              src={videoSrc}
+              controls
+              preload="metadata"
+              className="aspect-[9/16] w-full rounded-lg bg-black object-cover"
+            />
+          ) : (
+            <div
+              className="flex aspect-[9/16] w-full items-center justify-center rounded-lg bg-black/80 text-sm text-cinema-muted"
+              aria-busy="true"
+            >
+              Rendering…
+            </div>
+          )}
         </div>
 
         <div className="flex flex-1 flex-col gap-3">
@@ -37,13 +47,15 @@ export default function ShortCard({ jobId, short }) {
             {formatTime(short.start_time)} → {formatTime(short.end_time)} (
             {Math.round(short.duration)}s)
           </p>
-          <a
-            href={downloadHref}
-            download={`${short.id}.mp4`}
-            className="mt-auto inline-flex w-fit items-center gap-2 rounded-lg border border-cinema-border px-4 py-2.5 text-sm font-semibold transition hover:border-cinema-accent hover:text-cinema-accent"
-          >
-            ⬇ Download MP4
-          </a>
+          {ready && (
+            <a
+              href={downloadHref}
+              download={`${short.id}.mp4`}
+              className="mt-auto inline-flex w-fit items-center gap-2 rounded-lg border border-cinema-border px-4 py-2.5 text-sm font-semibold transition hover:border-cinema-accent hover:text-cinema-accent"
+            >
+              Download MP4
+            </a>
+          )}
         </div>
       </div>
     </article>

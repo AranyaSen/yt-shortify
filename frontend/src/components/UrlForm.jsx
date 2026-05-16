@@ -6,6 +6,7 @@ export default function UrlForm({ onJobStart, disabled }) {
   const [model, setModel] = useState('qwen3-8b')
   const [numShorts, setNumShorts] = useState(3)
   const [useLocalLlm, setUseLocalLlm] = useState(true)
+  const [renderMode, setRenderMode] = useState('native')
   const [clipStart, setClipStart] = useState('')
   const [clipEnd, setClipEnd] = useState('')
   const [submitError, setSubmitError] = useState(null)
@@ -39,6 +40,7 @@ export default function UrlForm({ onJobStart, disabled }) {
         model,
         num_shorts: numShorts,
         use_local_llm: useLocalLlm,
+        render_mode: renderMode,
       }
       if (startSec != null) body.clip_start = startSec
       if (endSec != null) body.clip_end = endSec
@@ -119,6 +121,46 @@ export default function UrlForm({ onJobStart, disabled }) {
         </div>
       </div>
 
+      <fieldset className="space-y-2 rounded-lg border border-cinema-border bg-black/30 px-4 py-3">
+        <legend className="text-xs font-medium uppercase tracking-wider text-cinema-muted">
+          Video rendering
+        </legend>
+        <label className="flex cursor-pointer items-start gap-3 rounded-md px-1 py-1 transition hover:text-white">
+          <input
+            type="radio"
+            name="render-mode"
+            value="native"
+            checked={renderMode === 'native'}
+            onChange={() => setRenderMode('native')}
+            disabled={disabled || loading}
+            className="mt-1 h-4 w-4 accent-cinema-accent"
+          />
+          <span className="text-sm text-white">
+            <span className="font-semibold">I have FFmpeg installed on the system</span>
+            <span className="mt-0.5 block text-xs text-cinema-muted">
+              Faster — uses FFmpeg installed on the system
+            </span>
+          </span>
+        </label>
+        <label className="flex cursor-pointer items-start gap-3 rounded-md px-1 py-1 transition hover:text-white">
+          <input
+            type="radio"
+            name="render-mode"
+            value="browser"
+            checked={renderMode === 'browser'}
+            onChange={() => setRenderMode('browser')}
+            disabled={disabled || loading}
+            className="mt-1 h-4 w-4 accent-cinema-accent"
+          />
+          <span className="text-sm text-white">
+            <span className="font-semibold">I do not have FFmpeg installed on the system (User browser FFmpeg)</span>
+            <span className="mt-0.5 block text-xs text-cinema-muted">
+              Runs in your browser (may take longer to render the video than native ffmpeg)
+            </span>
+          </span>
+        </label>
+      </fieldset>
+
       <label className="flex cursor-pointer items-center gap-3 rounded-lg border border-cinema-border bg-black/30 px-4 py-3 transition hover:border-cinema-muted">
         <input
           type="checkbox"
@@ -169,7 +211,7 @@ export default function UrlForm({ onJobStart, disabled }) {
             id="num-shorts"
             type="range"
             min={1}
-            max={5}
+            max={10}
             value={numShorts}
             onChange={(e) => setNumShorts(Number(e.target.value))}
             disabled={disabled || loading}

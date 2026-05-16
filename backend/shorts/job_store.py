@@ -31,6 +31,7 @@ def create_job(**meta) -> str:
             'clip_end': meta.get('clip_end'),
             'num_shorts': meta.get('num_shorts', 3),
             'use_local_llm': meta.get('use_local_llm', True),
+            'render_mode': meta.get('render_mode', 'native'),
             'created_at': _now(),
             'thread': None,
         }
@@ -52,6 +53,7 @@ def get_job(job_id: str) -> dict | None:
             'transcript': job.get('transcript'),
             'clip_start': job.get('clip_start'),
             'clip_end': job.get('clip_end'),
+            'render_mode': job.get('render_mode', 'native'),
         }
 
 
@@ -67,8 +69,11 @@ def update_job(job_id: str, **kwargs):
         if job is None:
             return
         for key, value in kwargs.items():
-            if key == 'shorts' and isinstance(value, dict):
-                job['shorts'].append(value)
+            if key == 'shorts':
+                if isinstance(value, dict):
+                    job['shorts'].append(value)
+                elif isinstance(value, list):
+                    job['shorts'] = value
             else:
                 job[key] = value
 

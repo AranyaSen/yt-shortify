@@ -2,7 +2,7 @@ const STEPS = [
   { key: 'downloading', label: 'Download' },
   { key: 'transcribing', label: 'Transcribe' },
   { key: 'analyzing', label: 'Analyze' },
-  { key: 'cutting', label: 'Cut' },
+  { key: 'cutting', label: 'Ready' },
 ]
 
 function stepIndex(status) {
@@ -13,6 +13,8 @@ function stepIndex(status) {
     analyzing: 2,
     awaiting_llm: 2,
     cutting: 3,
+    extracting_segments: 3,
+    ready_to_render: 3,
     done: 4,
     error: -1,
   }
